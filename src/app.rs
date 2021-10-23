@@ -1,46 +1,78 @@
 use log::*;
 use serde_derive::{Deserialize, Serialize};
-use strum::IntoEnumIterator;
-use strum_macros::{EnumIter, ToString};
+use std::time::Duration;
+use wasm_bindgen::JsCast;
+use web_sys::{self, CanvasRenderingContext2d, HtmlCanvasElement};
 use yew::format::Json;
 use yew::prelude::*;
+use yew::services::keyboard::{KeyListenerHandle, KeyboardService};
 use yew::services::storage::{Area, StorageService};
+use yew::services::timeout::TimeoutTask;
+use yew::services::TimeoutService;
+use yew::utils::document;
 
-const KEY: &str = "yew.todomvc.self";
-
+const KEY: &str = "high.score";
+const TICK_RATE: u64 = 200;
 pub struct App {
     link: ComponentLink<Self>,
     storage: StorageService,
     state: State,
+    ctx: Option<(HtmlCanvasElement, CanvasRenderingContext2d)>,
+    job: Option<TimeoutTask>,
+    keyboard_service: Option<Vec<KeyListenerHandle>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct State {
-    entries: Vec<Entry>,
-    filter: Filter,
-    value: String,
-    edit_value: String,
+    snake: Vec<Coords>,
+    high_score: usize,
+    velocity: Velocity,
 }
 
-#[derive(Serialize, Deserialize)]
-struct Entry {
-    description: String,
-    completed: bool,
-    editing: bool,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Velocity {
+    coords: Coords,
+    direction: Direction,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Coords {
+    x: f64,
+    y: f64,
+}
+
+fn coords<T>(x: T, y: T) -> Coords
+where
+    f64: From<T>,
+{
+    Coords {
+        x: x.into(),
+        y: y.into(),
+    }
+}
+
+impl Coords {
+    fn add(&self, other: &Self) -> Self {
+        coords(self.x + other.x, self.y + other.y)
+    }
+}
+
+#[derive(Debug)]
 pub enum Msg {
-    Add,
-    Edit(usize),
-    Update(String),
-    UpdateEdit(String),
-    Remove(usize),
-    SetFilter(Filter),
-    ToggleAll,
-    ToggleEdit(usize),
-    Toggle(usize),
-    ClearCompleted,
-    Nope,
+    Tick,
+    None,
+    Up,
+    Left,
+    Right,
+    Down,
 }
 
 impl Component for App {
@@ -49,310 +81,164 @@ impl Component for App {
 
     fn create(_: Self::Properties, link: ComponentLink<Self>) -> Self {
         let storage = StorageService::new(Area::Local).unwrap();
-        let entries = {
+        let high_score = {
             if let Json(Ok(restored_entries)) = storage.restore(KEY) {
                 restored_entries
             } else {
-                Vec::new()
+                0
             }
         };
         let state = State {
-            entries,
-            filter: Filter::All,
-            value: "".into(),
-            edit_value: "".into(),
+            snake: vec![
+                coords(200, 200),
+                coords(180, 200),
+                coords(160, 200),
+                coords(140, 200),
+            ],
+            high_score,
+            velocity: Velocity {
+                coords: coords(20, 0),
+                direction: Direction::Left,
+            },
         };
         App {
             link,
             storage,
             state,
+            ctx: None,
+            job: None,
+            keyboard_service: None,
         }
+    }
+
+    fn update(&mut self, msg: Self::Message) -> ShouldRender {
+        match msg {
+            Msg::Tick => &self.tick(),
+            Msg::Left | Msg::Right | Msg::Up | Msg::Down => &self.keydown(msg),
+            _ => &(),
+        };
+        true
     }
 
     fn change(&mut self, _props: Self::Properties) -> ShouldRender {
         false
     }
 
-    fn update(&mut self, msg: Self::Message) -> ShouldRender {
-        match msg {
-            Msg::Add => {
-                let entry = Entry {
-                    description: self.state.value.clone(),
-                    completed: false,
-                    editing: false,
-                };
-                self.state.entries.push(entry);
-                self.state.value = "".to_string();
-            }
-            Msg::Edit(idx) => {
-                let edit_value = self.state.edit_value.clone();
-                self.state.complete_edit(idx, edit_value);
-                self.state.edit_value = "".to_string();
-            }
-            Msg::Update(val) => {
-                println!("Input: {}", val);
-                self.state.value = val;
-            }
-            Msg::UpdateEdit(val) => {
-                println!("Input: {}", val);
-                self.state.edit_value = val;
-            }
-            Msg::Remove(idx) => {
-                self.state.remove(idx);
-            }
-            Msg::SetFilter(filter) => {
-                self.state.filter = filter;
-            }
-            Msg::ToggleEdit(idx) => {
-                self.state.edit_value = self.state.entries[idx].description.clone();
-                self.state.toggle_edit(idx);
-            }
-            Msg::ToggleAll => {
-                let status = !self.state.is_all_completed();
-                self.state.toggle_all(status);
-            }
-            Msg::Toggle(idx) => {
-                self.state.toggle(idx);
-            }
-            Msg::ClearCompleted => {
-                self.state.clear_completed();
-            }
-            Msg::Nope => {}
+    fn view(&self) -> Html {
+        html! {
+            <div class="container">
+                <div class="canvasContainer">
+                    <canvas id="canvas" width= "500px" height="500px">
+                    </canvas>
+                </div>
+            </div>
         }
-        self.storage.store(KEY, Json(&self.state.entries));
-        true
     }
 
-    fn view(&self) -> Html {
-        info!("rendered!");
-        html! {
-            <div class="todomvc-wrapper">
-                <section class="todoapp">
-                    <header class="header">
-                        <h1>{ "todos" }</h1>
-                        { self.view_input() }
-                    </header>
-                    <section class="main">
-                        <input class="toggle-all" type="checkbox" checked=self.state.is_all_completed() onclick=self.link.callback(|_| Msg::ToggleAll) />
-                        <ul class="todo-list">
-                            { for self.state.entries.iter().filter(|e| self.state.filter.fit(e))
-                                .enumerate()
-                                .map(|val| self.view_entry(val)) }
-                        </ul>
-                    </section>
-                    <footer class="footer">
-                        <span class="todo-count">
-                            <strong>{ self.state.total() }</strong>
-                            { " item(s) left" }
-                        </span>
-                        <ul class="filters">
-                            { for Filter::iter().map(|flt| self.view_filter(flt)) }
-                        </ul>
-                        <button class="clear-completed" onclick=self.link.callback(|_| Msg::ClearCompleted)>
-                            { format!("Clear completed ({})", self.state.total_completed()) }
-                        </button>
-                    </footer>
-                </section>
-                <footer class="info">
-                    <p>{ "Double-click to edit a todo" }</p>
-                    <p>{ "Written by " }<a href="https://github.com/DenisKolodin/" target="_blank">{ "Denis Kolodin" }</a></p>
-                    <p>{ "Part of " }<a href="http://todomvc.com/" target="_blank">{ "TodoMVC" }</a></p>
-                </footer>
-            </div>
+    fn rendered(&mut self, _first_render: bool) {
+        if self.ctx == None {
+            let canvas: HtmlCanvasElement = document()
+                .query_selector("#canvas")
+                .unwrap()
+                .unwrap()
+                .dyn_into()
+                .unwrap();
+            let ctx = canvas
+                .get_context("2d")
+                .unwrap()
+                .unwrap()
+                .dyn_into()
+                .unwrap();
+            self.ctx = Some((canvas, ctx));
+            self.start();
         }
     }
 }
 
 impl App {
-    fn view_filter(&self, filter: Filter) -> Html {
-        let flt = filter.clone();
-
-        html! {
-            <li>
-                <a class=if self.state.filter == flt { "selected" } else { "not-selected" }
-                   href=&flt
-                   onclick=self.link.callback(move |_| Msg::SetFilter(flt.clone()))>
-                    { filter }
-                </a>
-            </li>
-        }
+    fn start(&mut self) {
+        self.tick();
+        self.keyboard_service = Some(self.make_keyboard_service());
     }
+    fn tick(&mut self) {
+        &self.animate();
+        &self.render();
 
-    fn view_input(&self) -> Html {
-        html! {
-            // You can use standard Rust comments. One line:
-            // <li></li>
-            <input class="new-todo"
-                   placeholder="What needs to be done?"
-                   value=&self.state.value
-                   oninput=self.link.callback(|e: InputData| Msg::Update(e.value))
-                   onkeypress=self.link.callback(|e: KeyboardEvent| {
-                       if e.key() == "Enter" { Msg::Add } else { Msg::Nope }
-                   }) />
-            /* Or multiline:
-            <ul>
-                <li></li>
-            </ul>
-            */
-        }
-    }
-
-    fn view_entry(&self, (idx, entry): (usize, &Entry)) -> Html {
-        let mut class = "todo".to_string();
-        if entry.editing {
-            class.push_str(" editing");
-        }
-        if entry.completed {
-            class.push_str(" completed");
-        }
-
-        html! {
-            <li class=class>
-                <div class="view">
-                    <input class="toggle" type="checkbox" checked=entry.completed onclick=self.link.callback(move |_| Msg::Toggle(idx)) />
-                    <label ondblclick=self.link.callback(move |_| Msg::ToggleEdit(idx))>{ &entry.description }</label>
-                    <button class="destroy" onclick=self.link.callback(move |_| Msg::Remove(idx)) />
-                </div>
-                { self.view_entry_edit_input((&idx, &entry)) }
-            </li>
-        }
-    }
-
-    fn view_entry_edit_input(&self, (idx, entry): (&usize, &Entry)) -> Html {
-        let idx = *idx;
-        if entry.editing {
-            html! {
-                <input class="edit"
-                       type="text"
-                       value=&entry.description
-                       oninput=self.link.callback(move |e: InputData| Msg::UpdateEdit(e.value))
-                       onblur=self.link.callback(move |_| Msg::Edit(idx))
-                       onkeypress=self.link.callback(move |e: KeyboardEvent| {
-                          if e.key() == "Enter" { Msg::Edit(idx) } else { Msg::Nope }
-                       }) />
-            }
+        let over = &self.game_over();
+        if !over {
+            let handle = TimeoutService::spawn(
+                Duration::from_millis(TICK_RATE),
+                self.link.callback(|_| Msg::Tick),
+            );
+            self.job = Some(handle);
         } else {
-            html! { <input type="hidden" /> }
+            info!("over");
         }
     }
-}
 
-#[derive(EnumIter, ToString, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Filter {
-    All,
-    Active,
-    Completed,
-}
-
-impl<'a> Into<Href> for &'a Filter {
-    fn into(self) -> Href {
-        match *self {
-            Filter::All => "#/".into(),
-            Filter::Active => "#/active".into(),
-            Filter::Completed => "#/completed".into(),
+    fn game_over(&self) -> bool {
+        if self.state.snake[0].x.abs() > 460.
+            || self.state.snake[0].y.abs() > 460.
+            || self.state.snake[0].x < 40.
+            || self.state.snake[0].y < 40.
+        {
+            true
+        } else {
+            false
         }
     }
-}
-
-impl Filter {
-    fn fit(&self, entry: &Entry) -> bool {
-        match *self {
-            Filter::All => true,
-            Filter::Active => !entry.completed,
-            Filter::Completed => entry.completed,
-        }
+    fn animate(&mut self) {
+        &self
+            .state
+            .snake
+            .splice(0..0, [self.state.snake[0].add(&self.state.velocity.coords)]);
+        &self.state.snake.pop();
     }
-}
-
-impl State {
-    fn total(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn total_completed(&self) -> usize {
-        self.entries
-            .iter()
-            .filter(|e| Filter::Completed.fit(e))
-            .count()
-    }
-
-    fn is_all_completed(&self) -> bool {
-        let mut filtered_iter = self
-            .entries
-            .iter()
-            .filter(|e| self.filter.fit(e))
-            .peekable();
-
-        if filtered_iter.peek().is_none() {
-            return false;
-        }
-
-        filtered_iter.all(|e| e.completed)
-    }
-
-    fn toggle_all(&mut self, value: bool) {
-        for entry in self.entries.iter_mut() {
-            if self.filter.fit(entry) {
-                entry.completed = value;
+    fn render(&mut self) {
+        &self.clear();
+        if let Some((canvas, ctx)) = &self.ctx {
+            ctx.set_fill_style(&"#010101".into());
+            for coords in &self.state.snake[..] {
+                ctx.fill_rect(coords.x, coords.y, 20., 20.);
             }
         }
     }
-
-    fn clear_completed(&mut self) {
-        let entries = self
-            .entries
-            .drain(..)
-            .filter(|e| Filter::Active.fit(e))
-            .collect();
-        self.entries = entries;
+    fn clear(&self) {
+        if let Some((canvas, ctx)) = &self.ctx {
+            ctx.set_fill_style(&"#efefef".into());
+            ctx.fill_rect(0., 0., canvas.width().into(), canvas.height().into());
+        }
     }
-
-    fn toggle(&mut self, idx: usize) {
-        let filter = self.filter.clone();
-        let mut entries = self
-            .entries
-            .iter_mut()
-            .filter(|e| filter.fit(e))
-            .collect::<Vec<_>>();
-        let entry = entries.get_mut(idx).unwrap();
-        entry.completed = !entry.completed;
+    fn make_keyboard_service(&self) -> Vec<KeyListenerHandle> {
+        info!("keyboard service registered!");
+        let mut services: Vec<KeyListenerHandle> = Vec::with_capacity(4);
+        let handler = KeyboardService::register_key_down(
+            &document(),
+            self.link.callback(|key: KeyboardEvent| {
+                return match &key.key().replace("Arrow", "")[..] {
+                    "Left" | "a" => Msg::Left,
+                    "Right" | "d" => Msg::Right,
+                    "Up" | "w" => Msg::Up,
+                    "Down" | "s" => Msg::Down,
+                    _ => Msg::None,
+                };
+            }),
+        );
+        services.push(handler);
+        services
     }
+    fn keydown(&mut self, msg: Msg) {
+        use Direction::*;
 
-    fn toggle_edit(&mut self, idx: usize) {
-        let filter = self.filter.clone();
-        let mut entries = self
-            .entries
-            .iter_mut()
-            .filter(|e| filter.fit(e))
-            .collect::<Vec<_>>();
-        let entry = entries.get_mut(idx).unwrap();
-        entry.editing = !entry.editing;
-    }
-
-    fn complete_edit(&mut self, idx: usize, val: String) {
-        let filter = self.filter.clone();
-        let mut entries = self
-            .entries
-            .iter_mut()
-            .filter(|e| filter.fit(e))
-            .collect::<Vec<_>>();
-        let entry = entries.get_mut(idx).unwrap();
-        entry.description = val;
-        entry.editing = !entry.editing;
-    }
-
-    fn remove(&mut self, idx: usize) {
-        let idx = {
-            let filter = self.filter.clone();
-            let entries = self
-                .entries
-                .iter()
-                .enumerate()
-                .filter(|&(_, e)| filter.fit(e))
-                .collect::<Vec<_>>();
-            let &(idx, _) = entries.get(idx).unwrap();
-            idx
+        info!("{:?} {:?}", msg, &self.state.velocity.direction);
+        let (x, y, dir) = match (msg, &self.state.velocity.direction) {
+            (Msg::Left, Up | Down) => (-20, 0, Left),
+            (Msg::Right, Up | Down) => (20, 0, Right),
+            (Msg::Up, Left | Right) => (0, -20, Up),
+            (Msg::Down, Left | Right) => (0, 20, Down),
+            _ => return,
         };
-        self.entries.remove(idx);
+        self.state.velocity.coords = coords(x, y);
+        self.state.velocity.direction = dir;
     }
 }

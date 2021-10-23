@@ -1,7 +1,7 @@
 {
   "private": true,
   "scripts": {
-    "dev": "webpack-dev-server --mode development --open",
+    "dev": "webpack-dev-server --mode development",
     "build": "webpack --mode production",
     "build:dev": "webpack --mode development",
     "test": "wasm-pack test --chrome --firefox --safari --headless"
