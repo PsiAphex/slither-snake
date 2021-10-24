@@ -151,7 +151,6 @@ impl Component for App {
     }
 
     fn view(&self) -> Html {
-        let
         html! {
             <div class="container">
                 <center>
@@ -225,16 +224,11 @@ impl App {
     }
 
     fn game_over(&self) -> bool {
-        if self.state.snake[0].x.abs() > 460.
+        self.state.snake[0].x.abs() > 460.
             || self.state.snake[0].y.abs() > 460.
             || self.state.snake[0].x < 20.
             || self.state.snake[0].y < 20.
             || self.bite()
-        {
-            true
-        } else {
-            false
-        }
     }
     fn animate(&mut self) {
         self.state
@@ -283,16 +277,16 @@ impl App {
         let mut services: Vec<KeyListenerHandle> = Vec::with_capacity(4);
         let handler = KeyboardService::register_key_down(
             &document(),
-            self.link.callback(|key: KeyboardEvent| {
-                return match &key.key().replace("Arrow", "")[..] {
+            self.link.callback(
+                |key: KeyboardEvent| match &key.key().replace("Arrow", "")[..] {
                     "Left" | "a" => Msg::Left,
                     "Right" | "d" => Msg::Right,
                     "Up" | "w" => Msg::Up,
                     "Down" | "s" => Msg::Down,
                     "r" | " " => Msg::Restart,
                     _ => Msg::None,
-                };
-            }),
+                },
+            ),
         );
         services.push(handler);
         services
@@ -318,7 +312,7 @@ impl App {
         let mut snake: Vec<Coords> = self.state.snake.clone();
         let head = snake.remove(0);
         for part in snake.iter() {
-            if part.x == head.x && part.y == head.y {
+            if part == &head {
                 return true;
             }
         }
@@ -332,12 +326,9 @@ impl App {
     }
 }
 
-fn generate_apple(snake: &Vec<Coords>) -> Coords {
+fn generate_apple(snake: &[Coords]) -> Coords {
     let apple = Coords::random(500, 20);
-    if let Some(_) = snake
-        .iter()
-        .find(|pos| pos.x == apple.x && pos.y == apple.y)
-    {
+    if snake.iter().any(|pos| pos == &apple) {
         info!("apple 1 {:?}", apple);
         return generate_apple(snake);
     }
